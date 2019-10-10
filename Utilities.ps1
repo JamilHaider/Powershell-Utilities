@@ -23,6 +23,10 @@
 
 $ScriptDir = Split-Path $script:MyInvocation.MyCommand.Path
 
+# Need this to find installed packages
+. $ScriptDir\libs\InstalledPrograms.ps1
+
+
 # helper function
 function Get-Out(){
   $Out = [PSCustomObject]@{
@@ -43,4 +47,28 @@ function GetPackages($system){
     $result.Error = "Unable to Read Packages for $system"
   }
   $result
+}
+
+# Returns all the apps installed and visible in control panel
+function GetInstalledApps($system){
+  $result = Get-Out
+  try {
+    $result.Result = Get-InstalledApplication -ComputerName $system #| Where-Object {$_.Application.Contains("$AppName")}
+  }
+  catch {
+    $result.Error = "Unable to Check Installed Applications for $system"
+  }
+  $result
+  #$out = @()
+  #if($res -eq $null){ $out += "$AppName Not Installed"} else { $out += "$AppName is Installed"}
+  #$out 
+}
+
+# Search for an install application
+function FindInstalledApp($system, $AppName){
+  $apps = GetInstalledApps $system
+  if($apps.Result){
+    $apps.Result = $apps.Result | Where-Object {$_.Application.Contains($AppName)}
+  }
+  $apps
 }
