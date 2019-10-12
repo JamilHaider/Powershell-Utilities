@@ -27,48 +27,183 @@ $ScriptDir = Split-Path $script:MyInvocation.MyCommand.Path
 . $ScriptDir\libs\InstalledPrograms.ps1
 
 
-# helper function
+# helper functions
 function Get-Out(){
   $Out = [PSCustomObject]@{
-    Error = ""
+    Error = $null
     Result = $null
   }
   $Out
 }
 
-# Retrieve all the packages available in software center for a device
-function GetPackages($system){
-  $result = Get-Out 
-  $out = @()
+# abstract out try catch blocks
+function TryRun($Action, $message, $arguments){
+  $result = Get-Out
   try {
-    $result.Result = Get-WmiObject -ComputerName $system -Class CCM_Program -Namespace root\ccm\clientsdk
+    $result.Result = $scriptBlock.Invoke($arguments) 
   }
   catch {
-    $result.Error = "Unable to Read Packages for $system"
+    $result.Error = $message
   }
   $result
+}
+
+# Retrieve all the packages available in software center for a device
+function GetPackages($system){
+  $scriptBlock = {
+    Get-WmiObject -ComputerName $system -Class CCM_Program -Namespace root\ccm\clientsdk
+  }
+
+  $ErrorMessage = "Unable to Read Packages for $system"
+
+  TryRun $scriptBlock $ErrorMessage $system
+}
+
+function GetPackage($system, $packageName){ 
+  $packages = GetPackages $system
+  if($packages.Result){
+    $packages.Result = $packages.Result | Where-Object {$_.Name -eq $packageName}
+  }
+  $packages
+}
+
+# Triggers installation on a client system 
+function InstallPackage($system, $packageName){
+
+  $package = GetPackage $system $packageName
+
+  $ErrorMessage = "Unable to install the package. Make sure the system is reachable and WMI service WINMGMT is running"
+
+  if($package.Result){
+    $scriptBlock = {
+      Invoke-WmiMethod -ComputerName $system -Namespace root\ccm\clientsdk -class CCM_ProgramsManager -Name ExecutePrograms -ArgumentList $package.Result
+    }
+    $package = TryRun $scriptBlock $ErrorMessage $system
+  }
+
+  $package
+}
+
+# Checks if application is installed as per SCCM client 
+function IsAppInstalledSCCM($system, $packageName){
+  $out = GetPackage $system $packageName
+  if($out.Result){
+    $out.Result = $out.Result.LastRunStatus -eq 'Succeeded'
+  } 
+  $out
+}
+
+# delay the installation of updates that come through software center
+# usefull in scenario where installation of important packages is being delayed by updates. 
+function CancelUpdates($system){
+  $scriptBlock = {
+    $requests = gwmi -class sms_maintenancetaskrequests -namespace root\ccm -ComputerName $system
+    $toCancel = $requests | ? { $_.ClientID -eq "updatesmgr"}
+    if($toCancel -ne $null){
+      $toCancel.Delete()
+      $toCancel.Count + " Updates Cancelled. Restart CCMEXEC to install remaining packages"
+    }    
+  }
+
+  $ErrorMessage = "Unable to Cancel Updates. Please confirm if CCMEXEC and WINMGMT services are running on the system"
+
+  TryRun $scriptBlock $ErrorMessage $system
 }
 
 # Returns all the apps installed and visible in control panel
 function GetInstalledApps($system){
-  $result = Get-Out
-  try {
-    $result.Result = Get-InstalledApplication -ComputerName $system #| Where-Object {$_.Application.Contains("$AppName")}
+  $scriptBlock = {
+    Get-InstalledApplication -ComputerName $system
   }
-  catch {
-    $result.Error = "Unable to Check Installed Applications for $system"
-  }
-  $result
-  #$out = @()
-  #if($res -eq $null){ $out += "$AppName Not Installed"} else { $out += "$AppName is Installed"}
-  #$out 
+
+  $ErrorMessage = "Unable to Check Installed Applications for $system"
+
+  TryRun $scriptBlock $ErrorMessage $system
 }
 
-# Search for an install application
+# Search for an installed application
 function FindInstalledApp($system, $AppName){
   $apps = GetInstalledApps $system
   if($apps.Result){
     $apps.Result = $apps.Result | Where-Object {$_.Application.Contains($AppName)}
   }
   $apps
+}
+
+# Creates a Win32_Process on a given system. Non Interactive except for msg.exe
+function CreateWin32Process($system, $program){
+  $scriptBlock = {
+    Invoke-WmiMethod -Class Win32_Process -ComputerName $system -Name Create -ArgumentList $program
+  }
+
+  $ErrorMessage = "Unable to Create Process. Please check if system is accessible and you have approprate permissions"
+
+  TryRun $scriptBlock $ErrorMessage $system
+}
+
+
+# Remove MSI package given a guid 
+function RemoveMSI($system, $GUID){
+  CreateWin32Process $system "msiexec /x $GUID /qn"
+}
+
+# Retrieve the asset tag from bios
+function GetAssetTag($system){
+  $scriptBlock = {
+    Get-WmiObject -ComputerName $system Win32_SystemEnclosure 
+  }
+
+  $ErrorMessage = "Unable to run WMI command. Make sure system is accessible and WMI is running on the system"
+
+  TryRun $scriptBlock $ErrorMessage $system
+}
+
+
+function DisableBitlocker($system){
+  Invoke-Expression "manage-bde.exe -protectors -disable C: -ComputerName $system"  
+}
+
+function EnableBitlocker($system){
+  Invoke-Expression "manage-bde.exe -protectors -enable C: -ComputerName $system"  
+}
+
+# Schedule tasks for execution with automatic deletion after 5 minutes
+function ScheduleTask($system, $target, $TaskName){
+  $scriptBlock = {
+    $time = (Get-Date).AddMinutes(2).ToString("HH:mm")
+    # delete task on remote system after delay of 5 Minutes
+    $target2 = "sleep 300 && schtasks.exe /Delete /F /TN $TaskName"
+    $ntarget = "cmd /c $target && $target2"
+    schtasks /create /F /s $system /sc ONCE /RL HIGHEST /TN $TaskName /ST $time  /TR "$ntarget"  
+  }
+
+  $ErrorMessage = "Unable to Schedule the task"
+  
+  TryRun $scriptBlock $ErrorMessage $system
+}
+
+# Restart the computer unless the argument is the computer running the script
+function RestartComputer($system) {
+  if($system -eq $ENV:ComputerName){
+      "Skipping $system" 
+  }
+  else { 
+      Restart-Computer -ComputerName $system -Force 
+  }
+}
+
+# shutdown computer after releasing ip and flushing dns. Useful for situation where lots of computer are 
+# plugged in and removed after imaging and there is chance of running out of ip addresses. 
+function ShutdownComputer($system) = { 
+  if($system -eq $ENV:ComputerName){
+      "Skipping $system" 
+  }
+  else { 
+      CreateWin32Process $system "cmd /s /c shutdown /s && ipconfig /release && ipconfig /flushdns"
+  }
+}
+
+# force group policy update
+function GPUpdate($system){
+  CreateWin32Process $system 'gpupdate.exe /force'
 }
