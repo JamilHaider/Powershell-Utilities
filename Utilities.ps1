@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
-  Set of Unitilites for running queries and actions against fleet of devices using sccm  
+  Set of Utilites for running queries and actions against fleet of devices using sccm  
 .DESCRIPTION
-  Set of Function that can be used to validate newly imaged devices with Windows 7 and Windows 10
+  Functions that can be used to validate newly imaged devices with Windows 7 and Windows 10
   For example to check
   1. BitLocker Status
   2. Asset Tags
@@ -206,4 +206,26 @@ function ShutdownComputer($system) = {
 # force group policy update
 function GPUpdate($system){
   CreateWin32Process $system 'gpupdate.exe /force'
+}
+
+# Shows a popup on remote system.
+function SendMessage($system, $message, $timeout = 7200){
+  CreateWin32Process $system "C:\Windows\system32\msg.exe /time:$timeout * $message"
+}
+
+function PendingReboot($system){
+  (Test-PendingReboot -ComputerName $system).IsRebootPending
+}
+
+# purgeType = 0 => The next policy request will be for a full policy instead of the change in policy since the last policy request.
+# purgeType = 1 => The existing policy will be purged completely.
+function ResetPolicy($system, $purgeType = 0){
+  Invoke-WmiMethod -ComputerName $system -Namespace root\ccm -Class sms_client -Name ResetPolicy -ArgumentList $purgeType  
+}
+
+# Remove pending maintenance task requests which can stop the package in software center to install 
+function RemoveRequests($system){
+  $request = gwmi -class sms_maintenancetaskrequests -Namespace root\ccm -ComputerName $system
+  $requests.Delete()
+  Get-Service ccmexec -ComputerName $system  | Restart-Service 
 }
